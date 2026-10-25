@@ -1,0 +1,6 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": { "types": ["node"] },
+  "include": ["./**/*.ts", "../scripts/**/*.ts", "../src/lib/**/*.ts", "../src/export/**/*.ts", "../src/db/core.ts", "../src/db/backupCore.ts", "../src/db/trips.ts", "../src/db/claims.ts", "../src/db/rates.ts", "../src/db/settings.ts"],
+  "exclude": ["../node_modules"]
+}
