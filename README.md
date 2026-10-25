@@ -12,7 +12,7 @@
 
 ## 下载安装
 
-1. 打开 **[Releases 页面](../../releases/latest)**，下载 APK：
+1. 打开 **[Releases 页面](https://github.com/Asherdeng138/route-mileage/releases/latest)**，下载 APK：
    | 文件 | 适用 |
    |---|---|
    | `RouteMileage-1.6.1-arm64.apk`（约 50 MB） | **推荐**，近几年的安卓手机都用这个 |
