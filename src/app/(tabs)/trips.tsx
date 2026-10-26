@@ -7,7 +7,6 @@ import { TripRow } from '@/components/TripRow';
 import { LargeTitle, MonthSwitcher, Segmented } from '@/components/ui';
 import { space, useTheme } from '@/constants/theme';
 import { amountsForRange } from '@/db/amounts';
-import { archiveCounts } from '@/db/archive';
 import { getAppSettings } from '@/db/settings';
 import { listTrips } from '@/db/trips';
 import { addMonths, formatDateLong, monthKeyOf, monthLabel, monthRange, todayISO } from '@/lib/dates';
@@ -27,8 +26,8 @@ export default function TripsScreen() {
     const settings = await getAppSettings();
     const [from, to] = monthRange(month);
     const trips = await listTrips({ from, to, category: filter === 'all' ? undefined : filter });
-    const [amounts, counts] = await Promise.all([amountsForRange(from, to, settings), archiveCounts()]);
-    return { settings, trips, amounts, counts };
+    const amounts = await amountsForRange(from, to, settings);
+    return { settings, trips, amounts };
   }, [month, filter]);
 
   const sections: { title: string; data: Trip[] }[] = [];
@@ -64,13 +63,6 @@ export default function TripsScreen() {
         <Text style={{ color: t.textSecondary, textAlign: 'center' }}>
           {data ? `${data.trips.length} 条 · 公务 ${formatDistance(totalM, unit)}` : ' '}
         </Text>
-        {data && (data.counts.archived > 0 || data.counts.trash > 0) ? (
-          <Pressable onPress={() => router.push('/archive')} hitSlop={8} style={styles.archiveLink} accessibilityRole="link">
-            <Text style={{ color: t.primary, fontSize: 15 }}>
-              已归档 {data.counts.archived} 条 · 最近删除 {data.counts.trash} 条 ›
-            </Text>
-          </Pressable>
-        ) : null}
       </View>
       <SectionList
         sections={sections}
@@ -106,7 +98,6 @@ const styles = StyleSheet.create({
   list: { paddingHorizontal: space.lg, paddingBottom: 160 },
   dateHeader: { fontSize: 13, fontWeight: '700', marginTop: space.md, marginBottom: space.sm },
   empty: { textAlign: 'center', marginTop: space.xxl },
-  archiveLink: { alignSelf: 'center' },
   fab: {
     position: 'absolute',
     right: space.xl,

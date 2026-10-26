@@ -5,7 +5,7 @@ import { Badge, Button, Card, Field, Input, Notice, SectionTitle, SwitchRow } fr
 import { space, useTheme } from '@/constants/theme';
 import { googleUsage } from '@/db/apiUsage';
 import { getAppSettings, saveAppSettings } from '@/db/settings';
-import { DEFAULT_GOOGLE_MONTHLY_LIMIT, ROUTES_MONTHLY_LIMIT } from '@/lib/googleQuota';
+import { appMonthlyLimit, effectiveLimit, FREE_TIER_SAFETY_RATIO, GOOGLE_APIS } from '@/lib/googleQuota';
 import { useFocusData } from '@/lib/useAsync';
 import { parseNumber } from '@/lib/units';
 import { googleNearby, isGoogleConfigured, loadGoogleKey, maskKey, saveGoogleKey } from '@/services/google';
@@ -28,8 +28,8 @@ export default function GoogleSettingsScreen() {
     const s = await getAppSettings();
     const key = await loadGoogleKey();
     const [usage, routes] = await Promise.all([
-      googleUsage(s.googleMonthlyLimit),
-      googleUsage(ROUTES_MONTHLY_LIMIT, new Date(), 'routes.compute'),
+      googleUsage('places.nearby', effectiveLimit('places.nearby', s.googleMonthlyLimit)),
+      googleUsage('routes.compute', appMonthlyLimit('routes.compute')),
     ]);
     return { s, key, usage, routes };
   });
@@ -65,7 +65,9 @@ export default function GoogleSettingsScreen() {
 
   const onSaveLimit = async () => {
     const v = parseNumber(limitText ?? '');
-    if (v == null || v < 0 || v > 5000) return Alert.alert('请输入 0–5000 之间的次数', 'Nearby Search Pro 每月免费 5,000 次；建议 1,000。');
+    const max = appMonthlyLimit('places.nearby');
+    if (v == null || v < 0 || v > max)
+      return Alert.alert(`请输入 0–${max} 之间的次数`, `Nearby Search Pro 每月免费 ${GOOGLE_APIS['places.nearby'].freePerMonth.toLocaleString('en-GB')} 次，App 最多用到 70%（${max} 次）。`);
     await saveAppSettings({ googleMonthlyLimit: Math.floor(v) });
     setLimitText(null);
     reload();
@@ -76,9 +78,10 @@ export default function GoogleSettingsScreen() {
     try {
       const r = await googleNearby(LONDON, 100);
       reload();
-      if (r.status === 'ok') Alert.alert('连接成功', `Google 返回了 ${r.places.length} 个附近地点（本次计 1 次）。`);
+      if (r.status === 'ok') Alert.alert('连接成功', `Google 返回了 ${r.places.length} 个附近地点（调用成功，本月计 1 次）。`);
       else if (r.status === 'quota') Alert.alert('本月次数已用完', '下个月自动恢复，或提高上限。');
-      else if (r.status === 'error') Alert.alert('Google 返回错误', `${r.message ?? ''}\n\n请检查 Key、是否启用了 Places API (New)、结算账户。`);
+      else if (r.status === 'offline') Alert.alert('没有连接到 Google', '没有网络或连接超时。这次调用没有成功，不计入本月次数。');
+      else if (r.status === 'error') Alert.alert('Google 返回错误', `${r.message ?? ''}\n\n请检查 Key、是否启用了 Places API (New)、结算账户。这次调用没有成功，不计入本月次数。`);
       else Alert.alert('未启用', '请先填写 Key 并打开开关。');
     } finally {
       setTesting(false);
@@ -103,19 +106,28 @@ export default function GoogleSettingsScreen() {
             <Badge label={usage.exhausted ? '已用完 · 使用免费来源' : usage.warning ? '接近上限' : '正常'} tone={usage.exhausted ? 'record' : usage.warning ? 'warning' : 'success'} />
           </View>
           <Text style={{ color: t.textSecondary, fontSize: 12, lineHeight: 17 }}>
-            计费月 {usage.month}（按太平洋时间，比 Google 晚重置、不会提前）。只统计这部手机的调用；同一个 Key 用在别处的次数这里看不到。
+            附近地点识别 · {GOOGLE_APIS['places.nearby'].sku}。计费月 {usage.month}（按太平洋时间，比 Google 晚重置、不会提前）。
+            只有调用成功才计数（没网、超时、Key 错误都不算）。只统计这部手机；同一个 Key 用在别处的次数这里看不到。
           </Text>
           <SwitchRow label="使用 Google 识别附近地点" value={s.googleEnabled} onChange={(v) => saveAppSettings({ googleEnabled: v }).then(reload)} />
-          <Text style={{ color: t.textSecondary, fontSize: 13, lineHeight: 18 }}>
-            信号中断补算（Routes API）本月 {data.routes.used} / {data.routes.limit} 次。Compute Routes Essentials 每月免费 10,000 次，之后约 $5 / 1000 次。
-            需要在 Google Cloud 给 Key 的「API 限制」勾选 Routes API。
+          <View style={styles.row}>
+            <Text style={{ color: t.text, fontSize: 17, fontWeight: '600', flex: 1 }}>
+              信号中断补算 {data.routes.used} / {data.routes.limit}
+            </Text>
+            <Badge label={data.routes.exhausted ? '已用完 · 按直线计算' : data.routes.warning ? '接近上限' : '正常'} tone={data.routes.exhausted ? 'record' : data.routes.warning ? 'warning' : 'success'} />
+          </View>
+          <Text style={{ color: t.textSecondary, fontSize: 12, lineHeight: 17 }}>
+            {GOOGLE_APIS['routes.compute'].sku}：Google 每月免费 {GOOGLE_APIS['routes.compute'].freePerMonth.toLocaleString('en-GB')} 次，App 上限 {Math.round(FREE_TIER_SAFETY_RATIO * 100)}%。
+            需要在 Google Cloud 给 Key 的「API 限制」勾选 Routes API。App 内的 Google 地图（Maps SDK）免费、不限次数，不计数。
           </Text>
-          <Field label="每月上限（次）" hint={`默认 ${DEFAULT_GOOGLE_MONTHLY_LIMIT}。Google Nearby Search Pro 每月免费 5,000 次，之后约 $32 / 1000 次。`}>
+          <Field
+            label="附近地点每月上限（次）"
+            hint={`最多 ${appMonthlyLimit('places.nearby')}（Google 每月免费 ${GOOGLE_APIS['places.nearby'].freePerMonth.toLocaleString('en-GB')} 次 × 70%），可以调低。超出免费额度后约 $32 / 1000 次。`}>
             <View style={styles.row}>
               <Input
                 style={{ flex: 1 }}
                 keyboardType="number-pad"
-                value={limitText ?? String(s.googleMonthlyLimit)}
+                value={limitText ?? String(effectiveLimit('places.nearby', s.googleMonthlyLimit))}
                 onChangeText={setLimitText}
               />
               <Button title="保存" kind="secondary" onPress={onSaveLimit} disabled={limitText == null} />
@@ -136,7 +148,7 @@ export default function GoogleSettingsScreen() {
             <Button title="保存 Key" onPress={onSaveKey} disabled={!keyText.trim()} style={{ flex: 1 }} />
             {key ? <Button title="删除" kind="ghost" onPress={onRemoveKey} /> : null}
           </View>
-          <Button title="测试连接（计 1 次）" kind="secondary" onPress={onTest} loading={testing} disabled={!key || !s.googleEnabled} />
+          <Button title="测试连接（成功才计 1 次）" kind="secondary" onPress={onTest} loading={testing} disabled={!key || !s.googleEnabled} />
         </Card>
 
         <SectionTitle>Google Cloud 设置（避免意外收费）</SectionTitle>

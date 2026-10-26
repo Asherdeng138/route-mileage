@@ -2,14 +2,14 @@
   "expo": {
     "name": "里程记录",
     "slug": "route-mileage",
-    "version": "1.6.1",
+    "version": "1.7.2",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "routemileage",
     "userInterfaceStyle": "automatic",
     "android": {
       "package": "com.mia.routemileage",
-      "versionCode": 10,
+      "versionCode": 13,
       "adaptiveIcon": {
         "backgroundColor": "#1F4E9C",
         "foregroundImage": "./assets/images/android-icon-foreground.png",

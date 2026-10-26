@@ -7,6 +7,7 @@ import { PanMap } from '@/components/PanMap';
 import { Badge } from '@/components/ui';
 import { space, useTheme } from '@/constants/theme';
 import { googleUsage } from '@/db/apiUsage';
+import { effectiveLimit } from '@/lib/googleQuota';
 import { getAppSettings } from '@/db/settings';
 import { haversineM } from '@/lib/geo';
 import type { NearbyPlace } from '@/lib/nearby';
@@ -72,7 +73,7 @@ export default function PickPlaceScreen() {
   const refreshQuota = useCallback(async () => {
     const s = await getAppSettings();
     if (!s.googleEnabled) return setQuotaText('Google 已关闭，使用免费来源');
-    const u = await googleUsage(s.googleMonthlyLimit);
+    const u = await googleUsage('places.nearby', effectiveLimit('places.nearby', s.googleMonthlyLimit));
     setQuotaText(u.exhausted ? `本月 Google ${u.used}/${u.limit} 次已用完，已切换到免费来源` : `本月 Google 已用 ${u.used}/${u.limit} 次`);
   }, []);
 

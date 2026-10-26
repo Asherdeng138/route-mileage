@@ -24,6 +24,10 @@ export default function TabsLayout() {
         <NativeTabs.Trigger.Label>报表</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon md="receipt_long" />
       </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="archive">
+        <NativeTabs.Trigger.Label>归档</NativeTabs.Trigger.Label>
+        <NativeTabs.Trigger.Icon md="inventory_2" />
+      </NativeTabs.Trigger>
       <NativeTabs.Trigger name="settings">
         <NativeTabs.Trigger.Label>设置</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon md="settings" />

@@ -53,7 +53,7 @@ export function saveClaimSnapshot(s: ClaimSnapshot): Promise<number> {
   });
 }
 
-/** 用户确认已报销：快照锁定，快照内的行程标记为已报销 */
+/** 用户确认已报销：快照锁定，快照内的行程标记为已报销并移到「归档」（报表里只留未报销的） */
 export function confirmClaim(claimId: number): Promise<void> {
   return write(async (db) => {
     const row = await db.getFirstAsync<ClaimRow>('SELECT * FROM claims WHERE id = ?', [claimId]);
@@ -63,8 +63,9 @@ export function confirmClaim(claimId: number): Promise<void> {
     await db.runAsync(`UPDATE claims SET status = 'claimed', confirmed_at = ? WHERE id = ?`, [now, claimId]);
     if (ids.length) {
       await db.runAsync(
-        `UPDATE trips SET claimed_at = ?, claim_id = ?, updated_at = ? WHERE id IN (${ids.map(() => '?').join(',')})`,
-        [now, claimId, now, ...ids],
+        `UPDATE trips SET claimed_at = ?, claim_id = ?, updated_at = ?, archived_at = COALESCE(archived_at, ?)
+         WHERE id IN (${ids.map(() => '?').join(',')}) AND deleted_at IS NULL AND purged_at IS NULL`,
+        [now, claimId, now, now, ...ids],
       );
     }
   });
@@ -86,6 +87,13 @@ export async function listClaims(month?: string): Promise<ClaimRecord[]> {
   const rows = month
     ? await getDb().getAllAsync<ClaimRow>('SELECT * FROM claims WHERE month = ? ORDER BY id DESC', [month])
     : await getDb().getAllAsync<ClaimRow>('SELECT * FROM claims ORDER BY id DESC LIMIT 50');
+  return rows.map(toClaim);
+}
+
+/** 按 id 取报销记录（归档页显示已报销月份的报表） */
+export async function listClaimsByIds(ids: number[]): Promise<ClaimRecord[]> {
+  if (!ids.length) return [];
+  const rows = await getDb().getAllAsync<ClaimRow>(`SELECT * FROM claims WHERE id IN (${ids.map(() => '?').join(',')}) ORDER BY id DESC`, ids);
   return rows.map(toClaim);
 }
 
@@ -111,4 +119,29 @@ export function setMonthMiles(month: string, tenths: number | null, note: string
         Date.now(),
       ]);
   });
+}
+
+/**
+ * 等待公司报销的导出记录（所有月份）：已导出、未确认，并且里面还有没报销、没删除的行程。
+ * 同一个月重复导出了同样的行程时只保留最新的一份。
+ */
+export async function listPendingClaims(): Promise<ClaimRecord[]> {
+  const rows = await getDb().getAllAsync<ClaimRow>(`SELECT * FROM claims WHERE status = 'exported' ORDER BY id DESC`);
+  if (!rows.length) return [];
+  const open = new Set(
+    (
+      await getDb().getAllAsync<{ id: number }>(
+        `SELECT id FROM trips WHERE claimed_at IS NULL AND deleted_at IS NULL AND purged_at IS NULL`,
+      )
+    ).map((r) => r.id),
+  );
+  const seen = new Set<string>();
+  const out: ClaimRecord[] = [];
+  for (const c of rows.map(toClaim)) {
+    const key = `${c.month}|${[...c.tripIds].sort((a, b) => a - b).join(',')}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (c.tripIds.some((id) => open.has(id))) out.push(c);
+  }
+  return out;
 }

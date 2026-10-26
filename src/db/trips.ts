@@ -310,16 +310,16 @@ export function deleteTrip(id: number): Promise<void> {
   });
 }
 
-/** 标记 / 取消已报销（用户单独确认；导出文件不会自动改变状态） */
+/** 标记 / 取消已报销。已报销的行程同时移到「归档」；取消已报销时回到行程列表和报表 */
 export function setClaimed(ids: number[], claimed: boolean, claimId: number | null = null): Promise<void> {
   if (!ids.length) return Promise.resolve();
   const marks = ids.map(() => '?').join(',');
   const now = Date.now();
   return write(async (db) => {
     await db.runAsync(
-      // 取消已报销时一并取消归档（归档只针对已报销的行程）
-      `UPDATE trips SET claimed_at = ?, claim_id = ?, updated_at = ?${claimed ? '' : ', archived_at = NULL'} WHERE id IN (${marks})`,
-      [claimed ? now : null, claimed ? claimId : null, now, ...ids],
+      `UPDATE trips SET claimed_at = ?, claim_id = ?, updated_at = ?, archived_at = ${claimed ? 'COALESCE(archived_at, ?)' : 'NULL'}
+       WHERE id IN (${marks})`,
+      claimed ? [now, claimId, now, now, ...ids] : [null, null, now, ...ids],
     );
   });
 }

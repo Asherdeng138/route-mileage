@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { googleUsage, reserveGoogleCall } from '../src/db/apiUsage';
-import { billingMonth, quotaState } from '../src/lib/googleQuota';
+import { callWithQuota, finishGoogleCall, googleUsage, reserveGoogleCall } from '../src/db/apiUsage';
+import { googlePost } from '../src/lib/googleHttp';
+import { appMonthlyLimit, billingMonth, DEFAULT_GOOGLE_MONTHLY_LIMIT, effectiveLimit, quotaState } from '../src/lib/googleQuota';
 import {
   bestMatch,
   GOOGLE_NEARBY_FIELD_MASK,
@@ -30,22 +31,108 @@ test('billing month follows Pacific time (never resets before Google does)', () 
   assert.equal(quotaState(0, 0).exhausted, true); // 上限 0 = 完全不用 Google
 });
 
-test('monthly cap: reservations stop at the limit, also under concurrency, and reset next month', async () => {
+test('limits are 70% of each Google free tier; user setting can only lower it', () => {
+  assert.equal(appMonthlyLimit('places.nearby'), 3500); // Nearby Search Pro 免费 5,000 × 0.7
+  assert.equal(appMonthlyLimit('routes.compute'), 7000); // Compute Routes Essentials 免费 10,000 × 0.7
+  assert.equal(DEFAULT_GOOGLE_MONTHLY_LIMIT, 3500);
+  assert.equal(effectiveLimit('places.nearby', 1000), 1000);
+  assert.equal(effectiveLimit('places.nearby', 9999), 3500); // 不能超过 70%
+  assert.equal(effectiveLimit('places.nearby', -5), 0);
+  assert.equal(effectiveLimit('routes.compute'), 7000);
+});
+
+/** 模拟 Google：按顺序返回给定的结果（数字 = HTTP 状态码，'net' = 没网 / 超时） */
+function fakeGoogle(seq: (number | 'net')[]) {
+  let i = 0;
+  const calls: string[] = [];
+  const impl = (async (url: string) => {
+    calls.push(String(url));
+    const r = seq[i++ % seq.length];
+    await new Promise((res) => setTimeout(res, 5));
+    if (r === 'net') throw new Error('Network request failed');
+    const body = r >= 200 && r < 300 ? { places: [] } : { error: { message: `HTTP ${r} from Google` } };
+    return new Response(JSON.stringify(body), { status: r, headers: { 'Content-Type': 'application/json' } });
+  }) as unknown as typeof fetch;
+  return { impl, calls };
+}
+
+const nearbyCall = (impl: typeof fetch) => async () => {
+  const res = await googlePost('https://places.googleapis.com/v1/places:searchNearby', { key: 'test', fieldMask: 'places.id', body: {} }, impl);
+  return { ok: res.ok, value: res };
+};
+
+test('only successful Google calls are counted: errors, no network and timeouts are not', async () => {
   freshDb();
   const oct = new Date('2026-10-15T12:00:00Z');
-  const results = await Promise.all(Array.from({ length: 12 }, () => reserveGoogleCall('places.nearby', 5, oct)));
-  assert.equal(results.filter(Boolean).length, 5);
+  const g = fakeGoogle([200, 403, 'net', 500, 200, 400]);
+  const results = [];
+  for (let i = 0; i < 6; i++) results.push(await callWithQuota('places.nearby', 3500, nearbyCall(g.impl), oct));
+  assert.equal(g.calls.length, 6); // 6 次真的发出去了
   assert.deepEqual(
-    { used: (await googleUsage(5, oct)).used, exhausted: (await googleUsage(5, oct)).exhausted },
+    results.map((r) => (r.status === 'done' ? (r.value.ok ? 'ok' : r.value.offline ? 'offline' : `http ${r.value.httpStatus}`) : r.status)),
+    ['ok', 'http 403', 'offline', 'http 500', 'ok', 'http 400'],
+  );
+  assert.equal((await googleUsage('places.nearby', 3500, oct)).used, 2); // 只有 2 次成功
+  assert.equal((await googleUsage('routes.compute', 7000, oct)).used, 0); // 各接口分开计数
+
+  // call 自己抛错（例如解析代码出错）也不计数，占位会释放
+  await assert.rejects(callWithQuota('places.nearby', 3500, async () => { throw new Error('boom'); }, oct));
+  assert.equal((await googleUsage('places.nearby', 3500, oct)).used, 2);
+
+  // 成功但 Google 返回内容无法解析：Google 已经计费，所以也计数
+  const odd = (async () => new Response('not json', { status: 200 })) as unknown as typeof fetch;
+  const r = await callWithQuota('places.nearby', 3500, nearbyCall(odd), oct);
+  assert.ok(r.status === 'done' && r.value.ok);
+  assert.equal((await googleUsage('places.nearby', 3500, oct)).used, 3);
+});
+
+test('monthly cap: never exceeded under concurrency; failed calls free their slot; resets next month', async () => {
+  freshDb();
+  const oct = new Date('2026-10-15T12:00:00Z');
+  // 12 个请求同时发出、全部成功、上限 5：只会真的发出 5 个
+  const ok = fakeGoogle([200]);
+  const burst = await Promise.all(Array.from({ length: 12 }, () => callWithQuota('places.nearby', 5, nearbyCall(ok.impl), oct)));
+  assert.equal(ok.calls.length, 5);
+  assert.equal(burst.filter((r) => r.status === 'quota').length, 7);
+  assert.deepEqual(
+    { used: (await googleUsage('places.nearby', 5, oct)).used, exhausted: (await googleUsage('places.nearby', 5, oct)).exhausted },
     { used: 5, exhausted: true },
   );
-  assert.equal(await reserveGoogleCall('places.nearby', 5, oct), false);
-  // 提高上限后可以继续
-  assert.equal(await reserveGoogleCall('places.nearby', 6, oct), true);
+  assert.equal((await callWithQuota('places.nearby', 5, nearbyCall(ok.impl), oct)).status, 'quota');
+
+  // 失败的调用不占用额度：上限 6 时，连续失败 10 次后仍然可以成功 1 次
+  const bad = fakeGoogle([403]);
+  for (let i = 0; i < 10; i++) assert.equal((await callWithQuota('places.nearby', 6, nearbyCall(bad.impl), oct)).status, 'done');
+  assert.equal((await googleUsage('places.nearby', 6, oct)).used, 5);
+  assert.equal((await callWithQuota('places.nearby', 6, nearbyCall(ok.impl), oct)).status, 'done');
+  assert.equal((await googleUsage('places.nearby', 6, oct)).used, 6);
+
+  // 同时进行中的调用也占位：上限 7、已用 6，两个同时发出且第一个还没结束时，第二个被拒绝
+  const slow = fakeGoogle([200]);
+  const [a, b] = await Promise.all([
+    callWithQuota('places.nearby', 7, nearbyCall(slow.impl), oct),
+    callWithQuota('places.nearby', 7, nearbyCall(slow.impl), oct),
+  ]);
+  assert.deepEqual([a.status, b.status].sort(), ['done', 'quota']);
+
   // 下个月重新计数
   const nov = new Date('2026-11-02T12:00:00Z');
-  assert.equal((await googleUsage(5, nov)).used, 0);
-  assert.equal(await reserveGoogleCall('places.nearby', 5, nov), true);
+  assert.equal((await googleUsage('places.nearby', 5, nov)).used, 0);
+  assert.equal((await callWithQuota('places.nearby', 5, nearbyCall(ok.impl), nov)).status, 'done');
+});
+
+test('reservations: a ticket is finished once; low-level reserve respects in-flight calls', async () => {
+  freshDb();
+  const oct = new Date('2026-10-15T12:00:00Z');
+  const t1 = await reserveGoogleCall('routes.compute', 2, oct);
+  const t2 = await reserveGoogleCall('routes.compute', 2, oct);
+  assert.ok(t1 && t2);
+  assert.equal(await reserveGoogleCall('routes.compute', 2, oct), null); // 两个进行中，已满
+  await finishGoogleCall(t1!, true);
+  await finishGoogleCall(t1!, true); // 重复结束不会重复计数
+  await finishGoogleCall(t2!, false);
+  assert.equal((await googleUsage('routes.compute', 2, oct)).used, 1);
+  assert.ok(await reserveGoogleCall('routes.compute', 2, oct)); // 失败的那个位置释放了
 });
 
 test('Google Nearby Search request stays in the Pro tier (5,000 free per month)', () => {

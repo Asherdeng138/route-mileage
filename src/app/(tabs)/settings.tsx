@@ -9,6 +9,7 @@ import { space, useTheme } from '@/constants/theme';
 import { applyBackup, exportBackup, pickAndValidateBackup } from '@/db/backup';
 import type { ValidatedBackup } from '@/db/backupCore';
 import { googleUsage } from '@/db/apiUsage';
+import { effectiveLimit } from '@/lib/googleQuota';
 import { listMonthMiles } from '@/db/claims';
 import { listPlaces, PLACE_TYPE_LABEL } from '@/db/places';
 import { listRateVersions } from '@/db/rates';
@@ -27,7 +28,7 @@ export default function SettingsScreen() {
     places: await listPlaces(),
     rates: await listRateVersions(),
     months: await listMonthMiles(),
-    usage: await googleUsage((await getAppSettings()).googleMonthlyLimit),
+    usage: await googleUsage('places.nearby', effectiveLimit('places.nearby', (await getAppSettings()).googleMonthlyLimit)),
   }));
   const [edits, setEdits] = useState<Partial<AppSettings>>({});
   const [restoring, setRestoring] = useState(false);
@@ -252,15 +253,6 @@ export default function SettingsScreen() {
 
         <SectionTitle>数据</SectionTitle>
         <Card>
-          <Pressable onPress={() => router.push('/archive')} style={styles.linkRow}>
-            <View style={{ flex: 1 }}>
-              <Text style={{ color: t.text, fontSize: 16, fontWeight: '600' }}>归档与最近删除</Text>
-              <Text style={{ color: t.textSecondary, fontSize: 13 }}>
-                已报销可归档 → 30 天后移到最近删除 → 再 30 天永久删除（已报销里程仍计入本年累计）
-              </Text>
-            </View>
-            <Text style={{ color: t.primary, fontWeight: '700' }}>查看 ›</Text>
-          </Pressable>
           <Text style={{ color: t.textSecondary, lineHeight: 20 }}>
             数据只保存在这部手机上，不上传。建议每月导出一次备份，存到 Google Drive 或发到邮箱。
           </Text>

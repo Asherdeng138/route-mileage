@@ -103,7 +103,6 @@ export default function RootLayout() {
         <Stack.Screen name="rates" options={{ title: '报销费率' }} />
         <Stack.Screen name="month-miles" options={{ title: '往月里程' }} />
         <Stack.Screen name="help" options={{ title: '后台记录说明' }} />
-        <Stack.Screen name="archive" options={{ title: '归档与最近删除' }} />
         <Stack.Screen name="pick-place" options={{ title: '选择地点' }} />
         <Stack.Screen name="google" options={{ title: 'Google 地点' }} />
       </Stack>

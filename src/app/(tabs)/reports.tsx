@@ -5,14 +5,13 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { Badge, Button, Card, LargeTitle, MonthSwitcher, Notice, SectionTitle, Stat } from '@/components/ui';
 import { space, useTheme, type Theme } from '@/constants/theme';
-import { archiveTrips } from '@/db/archive';
-import { confirmClaim, listClaims, listMonthMiles, revokeClaim, type ClaimRecord } from '@/db/claims';
+import { confirmReimbursed, PendingClaimsCard } from '@/components/PendingClaims';
+import { listClaims, listMonthMiles, listPendingClaims, type ClaimRecord } from '@/db/claims';
 import { listPlaces } from '@/db/places';
 import { listRateVersions } from '@/db/rates';
 import { getAppSettings } from '@/db/settings';
 import { listBusinessTrips, listTrips } from '@/db/trips';
 import { buildClaimSnapshot, routeDescription, validateTrip, type ClaimIssue, type ClaimSnapshot } from '@/lib/claim';
-import { ARCHIVE_DAYS, TRASH_DAYS } from '@/lib/archive';
 import { addMonths, formatDateShort, formatDateSlash, monthKeyOf, monthLabel, monthRange, todayISO, yearRangeOf } from '@/lib/dates';
 import { formatPence, formatTenths, metersToTenths, milliPenceToPence } from '@/lib/money';
 import { useFocusData } from '@/lib/useAsync';
@@ -54,11 +53,12 @@ export default function ReportsScreen() {
       listPlaces(),
       listClaims(month),
     ]);
+    const pending = await listPendingClaims();
     const trips = monthTrips.filter((x) => x.category === 'business').reverse();
     const personal = monthTrips.filter((x) => x.category === 'personal').length;
     const issues = new Map<number, ClaimIssue[]>();
     for (const trip of trips) issues.set(trip.id, validateTrip(trip, places));
-    return { month, settings, trips, personal, yearTrips, manualMonths, rateVersions, issues, claims };
+    return { month, settings, trips, personal, yearTrips, manualMonths, rateVersions, issues, claims, pending };
   }, [month]);
 
   // 默认选中本月未报销的公务行程
@@ -134,46 +134,11 @@ export default function ReportsScreen() {
       setExported({ claimId: c.id, snapshot: c.snapshot, files });
     });
 
-  const archiveNote = `归档后不在行程列表显示（可在「行程 → 已归档」查看），${ARCHIVE_DAYS} 天后移到「最近删除」，再过 ${TRASH_DAYS} 天永久删除。本年累计里程不受影响，导出记录保留。`;
-
-  const archiveClaim = (claimId: number, ids: number[]) =>
-    run(`archive-${claimId}`, async () => {
-      const n = await archiveTrips(ids);
-      reload();
-      Alert.alert('已归档', `${n} 条行程已归档。`);
+  // 确认已报销：报表和行程移到底部「归档」，报表里只留未报销的
+  const onConfirm = (claim: Pick<ClaimRecord, 'id' | 'month' | 'tripIds' | 'totalPence' | 'totalTenths'>) =>
+    run('confirm', async () => {
+      if ((await confirmReimbursed(claim)) !== 'cancel') reload();
     });
-
-  const askArchive = (claimId: number, ids: number[]) =>
-    Alert.alert(`归档这 ${ids.length} 条已报销的行程？`, archiveNote, [
-      { text: '以后再说', style: 'cancel' },
-      { text: '归档', onPress: () => archiveClaim(claimId, ids) },
-    ]);
-
-  const onConfirm = (claimId: number, count: number) =>
-    Alert.alert(
-      '确认已报销？',
-      `把这次导出的 ${count} 条行程标记为已报销，并锁定这份报销快照。之后修改费率或行程，不会改变这份报表。`,
-      [
-        { text: '取消', style: 'cancel' },
-        {
-          text: '确认已报销',
-          onPress: () =>
-            run('confirm', async () => {
-              await confirmClaim(claimId);
-              reload();
-              const claim = data?.claims.find((c) => c.id === claimId);
-              const ids = claim?.tripIds ?? exported?.snapshot.trips.map((x) => x.tripId) ?? [];
-              if (ids.length) askArchive(claimId, ids);
-            }),
-        },
-      ],
-    );
-
-  const onRevoke = (claimId: number) =>
-    Alert.alert('撤销「已报销」？', '这些行程会恢复为未报销。导出记录会保留。', [
-      { text: '取消', style: 'cancel' },
-      { text: '撤销', style: 'destructive', onPress: () => run('revoke', async () => { await revokeClaim(claimId); reload(); }) },
-    ]);
 
   const loading = !data || data.month !== month;
   const empty = !loading && data.trips.length === 0;
@@ -182,6 +147,7 @@ export default function ReportsScreen() {
     <SafeAreaView style={{ flex: 1, backgroundColor: t.bg }} edges={['top']}>
       <ScrollView contentContainerStyle={styles.content}>
         <LargeTitle>报表</LargeTitle>
+        {data?.pending.length ? <PendingClaimsCard claims={data.pending} onChanged={reload} /> : null}
         <MonthSwitcher
           label={monthLabel(month)}
           onPrev={() => changeMonth(addMonths(month, -1))}
@@ -212,7 +178,7 @@ export default function ReportsScreen() {
 
         {empty && data.claims.some((c) => c.status === 'claimed') ? (
           <Notice tone="info">
-            {monthLabel(month)}已报销的行程已归档（可在「行程 → 已归档」查看）。下方导出记录可以重新生成当月的 Word / Excel。
+            {monthLabel(month)}已经报销，报表和行程都在底部的「归档」里，可以在那里重新分享 Word / Excel 或撤销。
           </Notice>
         ) : empty ? (
           <Notice>
@@ -298,50 +264,47 @@ export default function ReportsScreen() {
             </View>
             {data?.claims.find((c) => c.id === exported.claimId)?.status !== 'claimed' ? (
               <Button
-                title="公司已报销？确认标记"
-                kind="secondary"
-                onPress={() => onConfirm(exported.claimId, exported.snapshot.trips.length)}
+                title="公司已报销？确认（可顺便归档）"
+                kind="primary"
+                onPress={() =>
+                  onConfirm({
+                    id: exported.claimId,
+                    month: exported.snapshot.month,
+                    tripIds: exported.snapshot.trips.map((x) => x.tripId),
+                    totalPence: exported.snapshot.monthPence,
+                    totalTenths: exported.snapshot.monthTenths,
+                  })
+                }
                 loading={busy === 'confirm'}
               />
             ) : (
-              <Badge label="已确认报销" tone="success" />
+              <Badge label="已报销，已移到「归档」" tone="success" />
             )}
           </Card>
         ) : null}
 
-        {!loading && data.claims.length > 0 ? (
+        {!loading && data.claims.some((c) => c.status !== 'claimed') ? (
           <>
-            <SectionTitle>本月导出记录</SectionTitle>
-            {data.claims.map((c) => (
-              <Card key={c.id}>
-                <View style={styles.rowBetween}>
-                  <Text style={{ color: t.text, fontWeight: '700' }}>
-                    {new Date(c.createdAt).toLocaleString('en-GB')} · {c.tripIds.length} 条
+            <SectionTitle>本月已导出、未报销</SectionTitle>
+            {data.claims
+              .filter((c) => c.status !== 'claimed')
+              .map((c) => (
+                <Card key={c.id}>
+                  <View style={styles.rowBetween}>
+                    <Text style={{ color: t.text, fontWeight: '700' }}>
+                      {new Date(c.createdAt).toLocaleString('en-GB')} · {c.tripIds.length} 条
+                    </Text>
+                    <Badge label="等待报销" tone="warning" />
+                  </View>
+                  <Text style={{ color: t.textSecondary }}>
+                    {formatTenths(c.totalTenths)} miles · {formatPence(c.totalPence)}
                   </Text>
-                  <Badge label={c.status === 'claimed' ? '已报销' : '已导出，未确认'} tone={c.status === 'claimed' ? 'success' : 'warning'} />
-                </View>
-                <Text style={{ color: t.textSecondary }}>
-                  {formatTenths(c.totalTenths)} miles · {formatPence(c.totalPence)}
-                  {c.confirmedAt ? ` · 确认于 ${formatDateShort(new Date(c.confirmedAt).toISOString().slice(0, 10))}` : ''}
-                </Text>
-                {c.status === 'claimed' && data.trips.some((x) => x.claimId === c.id) ? (
-                  <Button
-                    title={`归档这 ${data.trips.filter((x) => x.claimId === c.id).length} 条行程`}
-                    kind="secondary"
-                    loading={busy === `archive-${c.id}`}
-                    onPress={() => askArchive(c.id, data.trips.filter((x) => x.claimId === c.id).map((x) => x.id))}
-                  />
-                ) : null}
-                <View style={styles.row}>
-                  <Button title="重新生成此快照" kind="ghost" style={{ flex: 1 }} onPress={() => reExport(c)} loading={busy === `re-${c.id}`} />
-                  {c.status === 'claimed' ? (
-                    <Button title="撤销已报销" kind="ghost" style={{ flex: 1 }} onPress={() => onRevoke(c.id)} />
-                  ) : (
-                    <Button title="确认已报销" kind="ghost" style={{ flex: 1 }} onPress={() => onConfirm(c.id, c.tripIds.length)} />
-                  )}
-                </View>
-              </Card>
-            ))}
+                  <View style={styles.row}>
+                    <Button title="重新生成此快照" kind="ghost" style={{ flex: 1 }} onPress={() => reExport(c)} loading={busy === `re-${c.id}`} />
+                    <Button title="确认已报销" kind="secondary" style={{ flex: 1 }} onPress={() => onConfirm(c)} />
+                  </View>
+                </Card>
+              ))}
           </>
         ) : null}
       </ScrollView>

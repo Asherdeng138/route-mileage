@@ -69,6 +69,12 @@ export interface MaintenanceResult {
  */
 export function runArchiveMaintenance(now = Date.now()): Promise<MaintenanceResult> {
   return write(async (db) => {
+    // 已报销但还在列表里的行程（1.7.0 及以前「只确认」的）：现在一律归入「归档」
+    await db.runAsync(
+      `UPDATE trips SET archived_at = ?, updated_at = ?
+       WHERE claimed_at IS NOT NULL AND archived_at IS NULL AND deleted_at IS NULL AND purged_at IS NULL AND status = 'completed'`,
+      [now, now],
+    );
     const moved = await db.runAsync(
       `UPDATE trips SET deleted_at = ?, updated_at = ?
        WHERE archived_at IS NOT NULL AND archived_at <= ? AND deleted_at IS NULL AND purged_at IS NULL`,

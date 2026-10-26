@@ -72,7 +72,7 @@
 ## 地图（Google 原生地图 / OpenStreetMap）
 
 - **App 内地图（1.4.0 起默认 Google）**：构建时如果有 Key（`.secrets/google-api-key.txt` 或环境变量 `GOOGLE_MAPS_API_KEY`），Key 会打包进安卓清单，记录页和行程详情显示 Google 原生地图（`react-native-maps`）：蓝色轨迹带白边、绿色起点、红色终点，记录中显示 Google 蓝点并跟随；拖动地图后暂停跟随，点右上角 ◎ 恢复。
-  - 安卓上的 Maps SDK 地图加载**免费、不限次数**，不计入每月 1000 次地点查询。
+  - 安卓上的 Maps SDK 地图加载**免费、不限次数**，不计入每月地点查询次数，也不需要计数。
   - Key 的「API 限制」必须同时勾选 **Maps SDK for Android** 和 Places API (New)；「应用限制」为 Android 应用 `com.mia.routemileage` + 私有签名 SHA-1。没勾选时地图是灰色空白（轨迹数据不受影响），可在「设置 → 记录与地图」改用 OpenStreetMap。
   - 没有 Key 的构建自动使用 OpenStreetMap，不会加载 Google 地图模块。
 - **Word 里的路线图始终用 OpenStreetMap**（Google 地图的截图不允许这样放进文件，且需要付费的 Static Maps API）。
@@ -185,7 +185,7 @@
   - 没有可行路线：保持直线，行程详情提示「请核对里程」。
 - **里程**：增加 =（路线长度 − 已计入的直线），自动计入申报里程；GPS 实测里程单独保留。手动修正过里程的行程不改申报里程；**已报销的行程不再改动**。
 - **显示**：地图（App 内 Google / OSM 地图和 Word 路线图）上补算路段为浅蓝虚线；行程详情显示「已补算 N 段：+X mi」，可以「撤销补算」/「重新补算」；以前的行程可以手动「按 Google 路线补算」。Word 图注写明 “plus X miles for GPS signal gaps, measured along the Google Maps driving route”。
-- **费用**：Routes API Compute Routes Essentials 每月免费 10,000 次（之后 $5 / 1000 次，2026-10-24 核对）。每段中断 1 次，App 内上限每月 1,000 次（与地点查询分开计数），超过后按直线计算。
+- **费用**：Routes API Compute Routes Essentials 每月免费 10,000 次（之后 $5 / 1000 次，2026-10-24 核对）。每段中断 1 次，App 内上限每月 7,000 次（免费额度 × 0.7，与地点查询分开计数，只计成功的调用），超过后按直线计算。
 - **需要你在 Google Cloud 做的**：启用 Routes API，并在 Key 的「API 限制」里勾选 Routes API（与 Places API (New)、Maps SDK for Android 并列）。建议把 ComputeRoutes 每日配额设为 100 左右。检查：`npx tsx scripts/check-routes.ts`。
 - 设置 → 记录与地图 →「信号中断时按 Google 路线补算」可以关闭。
 - 代码：规则 `src/lib/gaps.ts`，存储 `src/db/gaps.ts`（迁移 V6：`trip_gaps` 表、`trips.gap_fill_m / gap_fill_status`），查询 `src/services/gapFill.ts`，测试 `tests/gaps.test.ts`。
@@ -196,7 +196,8 @@
 已报销 ──归档──▶ 已归档 ──30 天──▶ 最近删除（可恢复）──30 天──▶ 永久删除
 ```
 
-- **归档**：只有已报销的行程可以归档。报表里「确认已报销」后会问是否归档这次导出的行程；导出记录卡片上也有「归档这 N 条行程」；单条行程详情里有「归档」。归档后不在行程列表、首页最近行程和报表选择列表里显示，在「行程 → 已归档 · 最近删除」（或「设置 → 数据 → 归档与最近删除」）查看，可以取消归档。
+- **确认报销（1.7.2）**：首页和报表顶部的「等待公司报销」列出所有月份已导出、未确认的报表（同一月份重复导出同样行程只显示最新一份，`listPendingClaims`）。点「已报销」确认后，报表锁定，行程标记已报销并**同时移到归档**（`confirmClaim` / `setClaimed(true)` 都会设置 `archived_at`）。报表页只显示未报销的行程和导出记录。
+- **归档标签页**（`src/app/(tabs)/archive.tsx`，底部第 4 个标签）：「已报销」按月显示报表摘要（条数、里程、金额、报销日期、剩余天数），可以「分享报表」（用确认时锁定的快照重新生成 Word / Excel）、「撤销已报销」（`revokeClaim`，回到行程和报表）、「删除本月」（移到最近删除）；「最近删除」可以按月或全部恢复。1.7.0「只确认」留下的已报销但未归档的行程，打开 App 时自动归档（`runArchiveMaintenance`）。
 - **最近删除**：归档满 30 天自动移到这里；你手动删除的行程也先进这里（以前是立即删除）。30 天内可以恢复（回到行程列表）。
 - **永久删除**：在最近删除满 30 天后，打开 App 时执行。轨迹点、起终点、地址、事由、备注、截图和路线图文件全部删除。
   - 已报销的公务行程只保留**日期、时间、里程**（没有任何地点信息），界面上不显示，只用于本年累计和 10,000 英里分档——否则删掉 4 月的行程会让之后的行程从 25p 错算回 45p。
@@ -222,7 +223,11 @@
 
 **费用控制**：
 - 价格依据 Google 官方价格页（2026-10-24 核对）：Nearby Search **Pro** 每月免费 5,000 次，超出后 $32 / 1000 次；Enterprise 档只有 1,000 次免费。App 只请求 Pro 档字段（名称、地址、坐标、类型），不请求评分、营业时间、电话，测试中有断言保证这一点。
-- **App 内硬上限**：每月默认 1,000 次，可在设置中调整，范围 0–5,000。每次调用 Google 之前先在数据库里「预约」计数，并发调用也不会超过上限。到达上限后，本月不再调用 Google，自动改用 OpenStreetMap 和手机地址解析；下个月自动恢复。月份按太平洋时间计算，和 Google 的计费月一致，不会提前重置。
+- **App 内硬上限（1.7.1）**：每个收费接口单独计数，上限 = Google 每月免费额度 × 0.7（`src/lib/googleQuota.ts` 的 `GOOGLE_APIS`）：附近地点 3,500 次（设置里可以调低，不能调高），信号中断补算 7,000 次。
+  - **只有调用成功才计数**：收到 Google 的 2xx 响应才算（包括「附近没有地点」这种成功但为空的结果，因为 Google 也会计费）；没有网络、超时、Key 错误、接口未启用都不计数。
+  - 调用前先「占位」（内存中的进行中计数）：本月成功次数 + 进行中 < 上限才发出，并发请求也不会超过上限；成功时在同一个写事务里计数并释放占位，失败时只释放占位（`callWithQuota`）。
+  - 到达上限后本月不再调用 Google，自动改用 OpenStreetMap / 按直线计算；下个月自动恢复。月份按太平洋时间计算，和 Google 的计费月一致，不会提前重置。
+  - 测试：`tests/google.test.ts`（模拟 Google 返回 200 / 4xx / 5xx / 没网 / 并发）；真实调用检查：`npx tsx scripts/check-quota-live.ts`（2026-10-26：正确 Key 成功各计 1 次，错误 Key 和没有网络都不计数）。
 - 预计用量：每趟行程约 2 次（开始 1 次、结束 1 次；如果起终点匹配到常用地点，就不调用 Google），拖动选点时每次停下 1 次。同一位置在本次打开 App 期间只查一次。
 - **Google 侧保险**（App 内上限只管得住这部手机）。「设置 → Google 地点」页里有分步说明：
   - API 限制只勾选 Places API (New)、Routes API（信号中断补算）和 Maps SDK for Android（App 内地图用）；
@@ -238,7 +243,7 @@
 需要 Node 24 LTS。构建 APK 还需要 JDK 17 和 Android SDK：`scripts/build-apk.ps1` 默认在 `%USERPROFILE%\tools` 下查找 `node-v24*`、`jdk-17*`、`android-sdk`，也可以用环境变量 `ROUTE_TOOLS` 指定目录。
 
 ```
-npm test                  # 75 个单元 / 集成测试（计算、过滤、快照、Word/Excel 结构、地图投影、PNG 解码、路线图、迁移、备份、并发）
+npm test                  # 80 个单元 / 集成测试（计算、过滤、快照、Word/Excel 结构、地图投影、PNG 解码、路线图、迁移、备份、并发）
 npm run typecheck         # App 与测试的 TypeScript 检查
 npm run lint              # ESLint（npx expo lint 在本机误报版本问题，所以直接调用 eslint）
 npm run samples           # 用「模拟数据」生成 samples/SAMPLE-*.docx / .xlsx（联网下载 OSM 图块生成路线图；加 -- --offline 只用轨迹预览）
@@ -252,10 +257,10 @@ npx expo start            # 开发服务器（需要先装 development build）
 
 | 文件 | 大小 | 适用 |
 |---|---|---|
-| `dist/RouteMileage-1.6.1-arm64.apk` | 50 MB | 近年绝大多数安卓手机（64 位 ARM），推荐 |
-| `dist/RouteMileage-1.6.1-universal.apk` | 121 MB | 所有 CPU 架构（含旧 32 位手机、模拟器） |
+| `dist/RouteMileage-1.7.2-arm64.apk` | 50 MB | 近年绝大多数安卓手机（64 位 ARM），推荐 |
+| `dist/RouteMileage-1.7.2-universal.apk` | 121 MB | 所有 CPU 架构（含旧 32 位手机、模拟器） |
 
-- 包名 `com.mia.routemileage`，版本 1.6.1（versionCode 10），目标 SDK 36。**从 1.2.0 起使用私有签名密钥**（见下节）；1.1.1 及以前使用公开的调试签名。
+- 包名 `com.mia.routemileage`，版本 1.7.2（versionCode 13），目标 SDK 36。**从 1.2.0 起使用私有签名密钥**（见下节）；1.1.1 及以前使用公开的调试签名。
 - 权限只有：定位（含后台）、前台定位服务、通知（含开机广播，来自 expo-notifications）、网络等基础项。1.4.0 起构建时会把 `.secrets/google-api-key.txt` 里的 Key 打包进 APK（Google 地图需要）。依赖库带入的摄像头、麦克风、悬浮窗、写存储权限用不到，已在 `app.json` 的 `blockedPermissions` 中屏蔽。
 - 工具链：Node 24、JDK 17、Android SDK（platform 37、build-tools 37.0.0、NDK 27.1、CMake 3.31.6）。首次运行脚本时需要阅读并接受 Android SDK 许可。新版 cmdline-tools 用 `android` 命令代替了 `sdkmanager`，安装时加了 `--no-metrics`，不上报使用数据。
 - Windows 上的坑：CMake 3.22.1 自带的 ninja 1.10 不支持长路径，编译 gesture-handler 时报 “Filename longer than 260 characters”。改用 CMake 3.31.6（自带 ninja 1.12.1），在 `android/local.properties` 里用 `cmake.dir` 指定。

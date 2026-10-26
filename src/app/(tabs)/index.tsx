@@ -3,10 +3,13 @@ import { useEffect, useState } from 'react';
 import { Alert, Linking, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { PendingClaimsCard } from '@/components/PendingClaims';
 import { TripRow } from '@/components/TripRow';
 import { Button, Card, LargeTitle, SectionTitle, Stat } from '@/components/ui';
 import { space, useTheme } from '@/constants/theme';
 import { amountsForRange, yearTotals } from '@/db/amounts';
+import { archiveCounts } from '@/db/archive';
+import { listPendingClaims } from '@/db/claims';
 import { getAppSettings } from '@/db/settings';
 import { getActiveTrip, listBusinessTrips, listTrips } from '@/db/trips';
 import { formatDateLong, monthKeyOf, monthRange, todayISO, yearLabelOf } from '@/lib/dates';
@@ -22,18 +25,20 @@ async function loadHome() {
   const [from, to] = monthRange(monthKeyOf(today));
   // 只读行程表（不读轨迹点）；最近行程只取 3 条
   // 本月里程含已归档的行程（与本年累计口径一致）
-  const [active, business, recent, amounts, year] = await Promise.all([
+  const [active, business, recent, amounts, year, pending, archive] = await Promise.all([
     getActiveTrip(),
     listBusinessTrips(from, to),
     listTrips({ limit: 3 }),
     amountsForRange(from, to, settings),
     yearTotals(today, settings),
+    listPendingClaims(),
+    archiveCounts(),
   ]);
   const monthTenths = business.reduce((s, t) => s + metersToTenths(t.distanceM), 0);
   const monthPence = milliPenceToPence(business.reduce((s, t) => s + (amounts.get(t.id)?.milliPence ?? 0), 0));
   const recentAmounts = recent.length ? await amountsForRange(recent[recent.length - 1].date, recent[0].date, settings) : new Map();
   const needsInfo = business.filter((t) => t.archivedAt == null && t.deletedAt == null && !t.startName && !t.startAddress && !t.reportDesc).length;
-  return { settings, today, active, monthTenths, monthPence, monthCount: business.length, recent, recentAmounts, year, needsInfo };
+  return { settings, today, active, monthTenths, monthPence, monthCount: business.length, recent, recentAmounts, year, needsInfo, pending, archive };
 }
 
 export default function HomeScreen() {
@@ -118,6 +123,8 @@ export default function HomeScreen() {
         )}
         <Button title="手动补录行程" kind="secondary" onPress={() => router.push('/trip/new')} />
 
+        {data?.pending.length ? <PendingClaimsCard claims={data.pending} onChanged={reload} /> : null}
+
         <SectionTitle>本月公务</SectionTitle>
         <Card style={{ gap: space.sm }}>
           <View style={styles.stats}>
@@ -146,7 +153,11 @@ export default function HomeScreen() {
         </SectionTitle>
         {data && data.recent.length === 0 ? (
           <Card>
-            <Text style={{ color: t.textSecondary, fontSize: 15 }}>还没有行程。出发时点「开始记录行程」。</Text>
+            <Text style={{ color: t.textSecondary, fontSize: 15 }}>
+              {data.archive.archived > 0
+                ? '最近的行程都已报销，可以在底部的「归档」里查看。'
+                : '还没有行程。出发时点「开始记录行程」。'}
+            </Text>
           </Card>
         ) : null}
         {data?.recent.map((trip) => (

@@ -12,7 +12,7 @@ import { space, useTheme } from '@/constants/theme';
 import { listGaps, type GapRow } from '@/db/gaps';
 import { listPlaces } from '@/db/places';
 import { getAppSettings } from '@/db/settings';
-import { archiveTrips, restoreTrips, trashTrips, unarchiveTrips } from '@/db/archive';
+import { restoreTrips, trashTrips } from '@/db/archive';
 import { getPoints, getTrip, manualDistanceM, recentStops, recentValues, setClaimed, updateTrip } from '@/db/trips';
 import { ARCHIVE_DAYS, lifecycleOf, TRASH_DAYS } from '@/lib/archive';
 import { routeDescription } from '@/lib/claim';
@@ -281,7 +281,7 @@ export default function TripDetailScreen() {
   const onDelete = () =>
     Alert.alert(
       '删除这条行程？',
-      `行程会移到「行程 → 最近删除」，${TRASH_DAYS} 天内可以恢复，之后永久删除。` +
+      `行程会移到底部「归档 → 最近删除」，${TRASH_DAYS} 天内可以恢复，之后永久删除。` +
         (trip.claimedAt ? '已报销的里程仍计入本年累计；已导出的报销文件不受影响。' : ''),
       [
         { text: '取消', style: 'cancel' },
@@ -296,29 +296,16 @@ export default function TripDetailScreen() {
       ],
     );
 
+  // 已报销的行程一律在底部「归档」；撤销已报销后回到「行程」和「报表」
   const onToggleClaimed = async () => {
-    await setClaimed([trip.id], !trip.claimedAt);
-    setData({
-      ...data,
-      trip: { ...trip, claimedAt: trip.claimedAt ? null : Date.now(), claimId: null, archivedAt: trip.claimedAt ? null : trip.archivedAt },
-    });
-  };
-
-  const onArchive = () =>
-    Alert.alert('归档这条行程？', `归档后不在行程列表显示，可以在「行程 → 已归档」查看。${ARCHIVE_DAYS} 天后移到「最近删除」，再过 ${TRASH_DAYS} 天永久删除。`, [
-      { text: '取消', style: 'cancel' },
-      {
-        text: '归档',
-        onPress: async () => {
-          await archiveTrips([trip.id]);
-          navigation.goBack();
-        },
-      },
-    ]);
-
-  const onUnarchive = async () => {
-    await unarchiveTrips([trip.id]);
-    setData({ ...data, trip: { ...trip, archivedAt: null } });
+    if (trip.claimedAt) {
+      await setClaimed([trip.id], false);
+      setData({ ...data, trip: { ...trip, claimedAt: null, claimId: null, archivedAt: null } });
+      return;
+    }
+    await setClaimed([trip.id], true);
+    Alert.alert('已标记为已报销', `这条行程已移到底部的「归档」，${ARCHIVE_DAYS} 天后移到「最近删除」，再过 ${TRASH_DAYS} 天自动删除。`);
+    navigation.goBack();
   };
 
   const onRestore = async () => {
@@ -361,9 +348,9 @@ export default function TripDetailScreen() {
         {life.state === 'archived' ? (
           <Card>
             <Text style={{ color: t.text, fontWeight: '600' }}>
-              已归档 · {life.daysLeft > 0 ? `${life.daysLeft} 天后移到「最近删除」` : '下次打开 App 时移到「最近删除」'}
+              已报销 · 在「归档」里 · {life.daysLeft > 0 ? `${life.daysLeft} 天后移到「最近删除」` : '下次打开 App 时移到「最近删除」'}
             </Text>
-            <Button title="取消归档" kind="secondary" onPress={onUnarchive} />
+            <Button title="撤销已报销" kind="secondary" onPress={onToggleClaimed} />
           </Card>
         ) : null}
         {life.state === 'trash' ? (
@@ -545,8 +532,7 @@ export default function TripDetailScreen() {
         </Card>
 
         <Button title="保存" onPress={onSave} loading={saving} />
-        {life.state === 'active' && life.canArchive ? <Button title="归档" kind="secondary" onPress={onArchive} /> : null}
-        {life.state !== 'trash' ? (
+        {life.state === 'active' ? (
           <Button title={trip.claimedAt ? '标记为未报销' : '标记为已报销'} kind="secondary" onPress={onToggleClaimed} />
         ) : null}
         {life.state !== 'trash' ? <Button title="删除行程" kind="ghost" onPress={onDelete} /> : null}

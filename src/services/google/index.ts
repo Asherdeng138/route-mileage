@@ -8,10 +8,11 @@
  *
  * 地图底图、路线图、地址解析都不需要 Google（OpenStreetMap + 手机自带解析），不产生费用。
  */
-import { googleUsage, reserveGoogleCall } from '@/db/apiUsage';
+import { callWithQuota, googleUsage } from '@/db/apiUsage';
 import { getAppSettings } from '@/db/settings';
 import { GOOGLE_ROUTES_FIELD_MASK, googleRoutesBody, parseGoogleRoutes, type RouteCandidate } from '@/lib/gaps';
-import { ROUTES_MONTHLY_LIMIT } from '@/lib/googleQuota';
+import { appMonthlyLimit, effectiveLimit } from '@/lib/googleQuota';
+import { googlePost } from '@/lib/googleHttp';
 import { GOOGLE_NEARBY_FIELD_MASK, googleNearbyBody, parseGoogleNearby, type NearbyPlace } from '@/lib/nearby';
 import type { LatLng } from '@/lib/types';
 
@@ -23,14 +24,14 @@ const TIMEOUT_MS = 8000;
 
 export type GoogleNearbyResult =
   | { status: 'ok'; places: NearbyPlace[] }
-  | { status: 'disabled' | 'no-key' | 'quota' | 'error'; places: []; message?: string };
+  | { status: 'disabled' | 'no-key' | 'quota' | 'error' | 'offline'; places: []; message?: string };
 
-/** 本月是否还能调用 Google（不计数） */
+/** 本月是否还能调用 Google 附近地点（不计数） */
 export async function googleAvailable(): Promise<{ ok: boolean; reason?: 'disabled' | 'no-key' | 'quota' }> {
   const s = await getAppSettings();
   if (!s.googleEnabled) return { ok: false, reason: 'disabled' };
   if (!(await loadGoogleKey())) return { ok: false, reason: 'no-key' };
-  const u = await googleUsage(s.googleMonthlyLimit);
+  const u = await googleUsage('places.nearby', effectiveLimit('places.nearby', s.googleMonthlyLimit));
   return u.exhausted ? { ok: false, reason: 'quota' } : { ok: true };
 }
 
@@ -39,33 +40,22 @@ export async function googleNearby(center: LatLng, radiusM: number): Promise<Goo
   if (!s.googleEnabled) return { status: 'disabled', places: [] };
   const key = (await loadGoogleKey()) || currentGoogleKey();
   if (!key) return { status: 'no-key', places: [] };
-  if (!(await reserveGoogleCall('places.nearby', s.googleMonthlyLimit))) return { status: 'quota', places: [] };
-
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-  try {
-    const res = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Goog-Api-Key': key,
-        'X-Goog-FieldMask': GOOGLE_NEARBY_FIELD_MASK,
-        ...androidIdentityHeaders(),
-      },
-      body: JSON.stringify(googleNearbyBody(center, radiusM)),
-      signal: ctrl.signal,
+  // 只有 Google 返回成功才计入本月次数（上限 = 免费额度 × 0.7，见 src/lib/googleQuota.ts）
+  const r = await callWithQuota('places.nearby', effectiveLimit('places.nearby', s.googleMonthlyLimit), async () => {
+    const res = await googlePost('https://places.googleapis.com/v1/places:searchNearby', {
+      key,
+      fieldMask: GOOGLE_NEARBY_FIELD_MASK,
+      body: googleNearbyBody(center, radiusM),
+      headers: androidIdentityHeaders(),
+      timeoutMs: TIMEOUT_MS,
     });
-    const json = await res.json().catch(() => null);
-    if (!res.ok) {
-      const msg = (json as { error?: { message?: string } } | null)?.error?.message ?? `HTTP ${res.status}`;
-      return { status: 'error', places: [], message: msg };
-    }
-    return { status: 'ok', places: parseGoogleNearby(json, center) };
-  } catch (e) {
-    return { status: 'error', places: [], message: (e as Error).message };
-  } finally {
-    clearTimeout(timer);
-  }
+    return { ok: res.ok, value: res };
+  });
+  if (r.status === 'quota') return { status: 'quota', places: [] };
+  const res = r.value;
+  if (res.offline) return { status: 'offline', places: [], message: res.message };
+  if (!res.ok) return { status: 'error', places: [], message: res.message };
+  return { status: 'ok', places: parseGoogleNearby(res.json, center) };
 }
 
 export type GoogleRoutesResult =
@@ -76,31 +66,19 @@ export type GoogleRoutesResult =
 export async function googleRoutes(from: LatLng, to: LatLng): Promise<GoogleRoutesResult> {
   const key = (await loadGoogleKey()) || currentGoogleKey();
   if (!key) return { status: 'no-key', routes: [] };
-  if (!(await reserveGoogleCall('routes.compute', ROUTES_MONTHLY_LIMIT))) return { status: 'quota', routes: [] };
-
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
-  try {
-    const res = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Goog-Api-Key': key,
-        'X-Goog-FieldMask': GOOGLE_ROUTES_FIELD_MASK,
-        ...androidIdentityHeaders(),
-      },
-      body: JSON.stringify(googleRoutesBody(from, to)),
-      signal: ctrl.signal,
+  const r = await callWithQuota('routes.compute', appMonthlyLimit('routes.compute'), async () => {
+    const res = await googlePost('https://routes.googleapis.com/directions/v2:computeRoutes', {
+      key,
+      fieldMask: GOOGLE_ROUTES_FIELD_MASK,
+      body: googleRoutesBody(from, to),
+      headers: androidIdentityHeaders(),
+      timeoutMs: TIMEOUT_MS,
     });
-    const json = await res.json().catch(() => null);
-    if (!res.ok) {
-      const msg = (json as { error?: { message?: string } } | null)?.error?.message ?? `HTTP ${res.status}`;
-      return { status: 'error', routes: [], message: msg };
-    }
-    return { status: 'ok', routes: parseGoogleRoutes(json) };
-  } catch (e) {
-    return { status: 'offline', routes: [], message: (e as Error).message };
-  } finally {
-    clearTimeout(timer);
-  }
+    return { ok: res.ok, value: res };
+  });
+  if (r.status === 'quota') return { status: 'quota', routes: [] };
+  const res = r.value;
+  if (res.offline) return { status: 'offline', routes: [], message: res.message };
+  if (!res.ok) return { status: 'error', routes: [], message: res.message };
+  return { status: 'ok', routes: parseGoogleRoutes(res.json) };
 }
